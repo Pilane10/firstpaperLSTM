@@ -5,6 +5,9 @@ numpy==1.22.3
 regex==2022.3.2
 requests==2.27.1
 seaborn==0.11.2
-scikt-learn==1.1.0
-torch==1.11.0
+scikit-learn==1.1.0
+#torch==1.11.0
 tqdm==4.63.0
+
+#add torch with cuda via terminal
+#pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
