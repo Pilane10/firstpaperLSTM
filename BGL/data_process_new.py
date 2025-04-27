@@ -10,13 +10,16 @@ from tqdm import tqdm
 data_dir = os.path.expanduser("~/.dataset/bgl")
 output_dir = "../output/bgl/"
 log_file = "BGL.log"
-time_window = 60  # Size of the time window in seconds
+time_window = 60  # Time window size in seconds
 n_folds = 5  # Number of k-folds
-train_size = 5000
-tuning_size_normal = 1000
-tuning_size_anomaly = 1000
-eval_size_normal = 5000
-eval_size_anomaly = 1000
+total_normal_logs = 25000  # Total normal logs
+total_anomaly_logs = 1800  # Total anomaly logs
+train_split_size = 20000  # Training split size for normal logs
+train_size_per_fold = 5000  # Training size per fold for normal logs
+tuning_size_normal = 1000  # Tuning size for normal logs (from training split)
+tuning_size_anomaly = 1000  # Tuning size for anomaly logs
+eval_size_normal = 5000  # Evaluation size for normal logs
+eval_size_anomaly = 1000  # Evaluation size for anomaly logs
 
 # Constants for Label
 PAD = 0
@@ -61,21 +64,12 @@ def preprocess_logs(structured_log_path):
     """
     df = pd.read_csv(structured_log_path)
 
-    # Debugging: Check the first few rows of the structured log
-    print("Structured Log Head:\n", df.head())
-
     # Convert Label column
     df["Label"] = df["Label"].replace("-", 0).apply(lambda x: 1 if x != 0 else 0)
-
-    # Debugging: Check unique values in the Label column
-    print("Unique Labels after conversion:", df["Label"].unique())
 
     # Convert Time to datetime and create timestamp
     df["datetime"] = pd.to_datetime(df["Time"], format="%Y-%m-%d-%H.%M.%S.%f", errors="coerce")
     df["timestamp"] = df["datetime"].values.astype(np.int64) // 10 ** 9
-
-    # Debugging: Check for missing or invalid timestamps
-    print("Missing timestamps:", df["timestamp"].isnull().sum())
 
     return df
 
@@ -99,9 +93,6 @@ def group_logs(df, time_window):
         label = 1 if any(group["Label"] == 1) else 0
         grouped_sequences.append((sequence, label))
 
-    # Debugging: Inspect a few grouped sequences
-    print("Sample grouped sequences:\n", grouped_sequences[:5])
-
     return grouped_sequences
 
 
@@ -114,34 +105,42 @@ def generate_kfolds(grouped_sequences, output_dir, n_folds):
         output_dir (str): Path to save the splits.
         n_folds (int): Number of k-folds.
     """
-    normal_sequences = [seq for seq, label in grouped_sequences if label == 0]
-    anomaly_sequences = [seq for seq, label in grouped_sequences if label == 1]
+    normal_sequences = [seq for seq, label in grouped_sequences if label == 0][:total_normal_logs]
+    anomaly_sequences = [seq for seq, label in grouped_sequences if label == 1][:total_anomaly_logs]
 
     print(f"Total normal sequences: {len(normal_sequences)}")
     print(f"Total anomaly sequences: {len(anomaly_sequences)}")
 
+    # Split normal logs into train and evaluation sets
+    train_normal_logs = normal_sequences[:train_split_size]  # 20,000 normal logs for training
+    eval_normal_logs = normal_sequences[train_split_size:]  # 5,000 normal logs for evaluation
+
+    # K-Fold Cross-Validation
     kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
 
-    for fold_idx, (train_idx, test_idx) in enumerate(kf.split(normal_sequences), start=1):
+    for fold_idx, (train_idx, _) in enumerate(kf.split(train_normal_logs), start=1):
         fold_dir = os.path.join(output_dir, f"fold_{fold_idx}")
         os.makedirs(fold_dir, exist_ok=True)
 
-        train = [normal_sequences[idx] for idx in train_idx[:train_size]]
-        tuning_normal = [normal_sequences[idx] for idx in train_idx[train_size:train_size + tuning_size_normal]]
+        # Training data (5,000 normal logs per fold)
+        train = [train_normal_logs[idx] for idx in train_idx[:train_size_per_fold]]
+
+        # Tuning data (1,000 normal + 1,000 anomaly logs)
+        tuning_normal = [train_normal_logs[idx] for idx in train_idx[train_size_per_fold:train_size_per_fold + tuning_size_normal]]
         tuning_anomaly = anomaly_sequences[:tuning_size_anomaly]
         tuning = tuning_normal + tuning_anomaly
 
-        eval_normal = [normal_sequences[idx] for idx in test_idx[:eval_size_normal]]
-        eval_anomaly = anomaly_sequences[tuning_size_anomaly:tuning_size_anomaly + eval_size_anomaly]
-        evaluation = eval_normal + eval_anomaly
+        # Evaluation data (5,000 normal + 1,000 anomaly logs)
+        evaluation = eval_normal_logs + anomaly_sequences[tuning_size_anomaly:tuning_size_anomaly + eval_size_anomaly]
 
-        # Debugging: Check the sizes of the datasets
-        print(f"Fold {fold_idx} - Train: {len(train)}, Tuning: {len(tuning)}, Evaluation: {len(evaluation)}")
-
+        # Save the datasets and print their sizes
         for dataset, name in zip([train, tuning, evaluation], ["train", "tuning", "eval"]):
-            with open(os.path.join(fold_dir, name), "w") as f:
+            dataset_path = os.path.join(fold_dir, name)
+            with open(dataset_path, "w") as f:
                 for sequence in dataset:
                     f.write(" ".join(sequence) + "\n")
+            print(f"Fold {fold_idx} - {name.capitalize()} Size: {len(dataset)} logs")
+
         print(f"Saved fold {fold_idx} to {fold_dir}")
 
 
@@ -152,10 +151,6 @@ if __name__ == "__main__":
     # Step 2: Preprocess logs
     structured_log_path = os.path.join(output_dir, f"{log_file}_structured.csv")
     df = preprocess_logs(structured_log_path)
-
-    # Debugging: Check the overall structure of the DataFrame
-    print("Preprocessed DataFrame Info:")
-    print(df.info())
 
     # Step 3: Group logs into sequences
     grouped_sequences = group_logs(df, time_window)
