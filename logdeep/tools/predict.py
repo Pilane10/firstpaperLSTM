@@ -19,10 +19,20 @@ from logdeep.dataset.log import log_dataset
 from logdeep.dataset.sample import session_window, sliding_window
 
 
+def generate(fold_dir, name):
+    """
+    Load the specified data file from the given fold directory.
 
-def generate(output_dir, name):
-    print("Loading", output_dir + name)
-    with open(output_dir + name, 'r') as f:
+    Args:
+        fold_dir (str): The path to the specific fold directory (e.g., 'fold_1').
+        name (str): The name of the data file to load (e.g., 'eval').
+
+    Returns:
+        tuple: A tuple containing the loaded data iterator and its length.
+    """
+    file_path = os.path.join(fold_dir, name)  # Construct the file path using the fold directory
+    print("Loading", file_path)
+    with open(file_path, 'r') as f:
         data_iter = f.readlines()
     return data_iter, len(data_iter)
 
@@ -166,78 +176,36 @@ class Predicter():
     def predict_unsupervised(self):
         model = self.model.to(self.device)
         model.load_state_dict(torch.load(self.model_path)['state_dict'])
-        #model.load_state_dict(torch.load(self.model_path, weights_only=True)['state_dict'])
         model.eval()
         print('model_path: {}'.format(self.model_path))
 
         with open(self.vocab_path, 'rb') as f:
             vocab = pickle.load(f)
 
-        test_normal_loader, _ = generate(self.output_dir, 'test_normal')
-        test_abnormal_loader, _ = generate(self.output_dir, 'test_abnormal')
+        # Iterate through fold directories
+        fold_dirs = [os.path.join(self.output_dir, fold) for fold in os.listdir(self.output_dir) if fold.startswith("fold_")]
+        for fold_dir in fold_dirs:
+            print(f"Processing fold: {fold_dir}...")
 
-        scale = None
-        if self.is_time:
-            with open(self.save_dir + "scale.pkl", "rb") as f:
-                scale = pickle.load(f)
+            # Load eval data from the fold directory
+            test_loader, _ = generate(fold_dir, 'eval')
 
-        # Test the model
-        start_time = time.time()
-        test_normal_results, normal_errors = self.unsupervised_helper(model, test_normal_loader, vocab, 'test_normal', scale=scale, min_len=self.min_len)
-        test_abnormal_results, abnormal_errors = self.unsupervised_helper(model, test_abnormal_loader, vocab, 'test_abnormal', scale=scale, min_len=self.min_len)
+            scale = None
+            if self.is_time:
+                scale_path = os.path.join(fold_dir, "scale.pkl")
+                with open(scale_path, "rb") as f:
+                    scale = pickle.load(f)
 
-        print("Saving test normal results", self.save_dir + "test_normal_results")
-        with open(self.save_dir + "test_normal_results", "wb") as f:
-            pickle.dump(test_normal_results, f)
+            # Test the model
+            start_time = time.time()
+            test_results, normal_errors = self.unsupervised_helper(
+                model, test_loader, vocab, 'eval', scale=scale, min_len=self.min_len)
 
-        print("Saving test abnormal results", self.save_dir + "test_abnormal_results")
-        with open(self.save_dir + "test_abnormal_results", "wb") as f:
-            pickle.dump(test_abnormal_results, f)
+            # Save the results in the fold directory
+            results_path = os.path.join(fold_dir, "test_results.pkl")
+            print("Saving test results to", results_path)
+            with open(results_path, "wb") as f:
+                pickle.dump(test_results, f)
 
-        TH, TP, TN, FP, FN, P, R, F1 = self.find_best_threshold(test_normal_results,
-                                                                test_abnormal_results,
-                                                                threshold_range=np.arange(10))
-        print('Best threshold', TH)
-        print("Confusion matrix")
-        print("TP: {}, TN: {}, FP: {}, FN: {}".format(TP, TN, FP, FN))
-        print('Precision: {:.3f}%, Recall: {:.3f}%, F1-measure: {:.3f}%'.format(P, R, F1))
-
-        elapsed_time = time.time() - start_time
-        print('elapsed_time: {}'.format(elapsed_time))
-
-    def predict_supervised(self):
-        model = self.model.to(self.device)
-        model.load_state_dict(torch.load(self.model_path)['state_dict'])
-        model.eval()
-        print('model_path: {}'.format(self.model_path))
-        test_logs, test_labels = session_window(self.output_dir, datatype='test')
-        test_dataset = log_dataset(logs=test_logs,
-                                   labels=test_labels,
-                                   seq=self.sequentials,
-                                   quan=self.quantitatives,
-                                   sem=self.semantics)
-        self.test_loader = DataLoader(test_dataset,
-                                      batch_size=self.batch_size,
-                                      shuffle=False,
-                                      pin_memory=True)
-        tbar = tqdm(self.test_loader, desc="\r")
-        TP, FP, FN, TN = 0, 0, 0, 0
-        for i, (log, label) in enumerate(tbar):
-            features = []
-            for value in log.values():
-                features.append(value.clone().to(self.device))
-            output = self.model(features=features, device=self.device)
-            output = F.sigmoid(output)[:, 0].cpu().detach().numpy()
-            # predicted = torch.argmax(output, dim=1).cpu().numpy()
-            predicted = (output < 0.2).astype(int)
-            label = np.array([y.cpu() for y in label])
-            TP += ((predicted == 1) * (label == 1)).sum()
-            FP += ((predicted == 1) * (label == 0)).sum()
-            FN += ((predicted == 0) * (label == 1)).sum()
-            TN += ((predicted == 0) * (label == 0)).sum()
-        P = 100 * TP / (TP + FP)
-        R = 100 * TP / (TP + FN)
-        F1 = 2 * P * R / (P + R)
-        print(
-            'false positive (FP): {}, false negative (FN): {}, Precision: {:.3f}%, Recall: {:.3f}%, F1-measure: {:.3f}%'
-            .format(FP, FN, P, R, F1))
+            elapsed_time = time.time() - start_time
+            print(f"Elapsed time for fold {fold_dir}: {elapsed_time:.2f} seconds")
