@@ -134,7 +134,7 @@ class Trainer():
                 self.trainer.save(self.model_path)
                 epochs_no_improve = 0
 
-                if epoch > 10 and self.hypersphere_loss:
+                if epoch > 3 and self.hypersphere_loss:
                     best_center = self.trainer.hyper_center
                     best_radius = self.trainer.radius
                     total_dist = train_dist + valid_dist

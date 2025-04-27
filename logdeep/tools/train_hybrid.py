@@ -1,0 +1,367 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import gc
+import os
+import sys
+import time
+sys.path.append('../../')
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+from tqdm import tqdm
+import pickle
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from sklearn.model_selection import KFold
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+
+from logdeep.dataset.log import log_dataset
+from logdeep.dataset.sample import sliding_window, session_window, split_features
+from logdeep.tools.utils import save_parameters, plot_train_valid_loss
+
+
+class Trainer():
+    def __init__(self, model, options):
+        self.model_name = options['model_name']
+        self.save_dir = options['save_dir']
+        self.output_dir = options['output_dir']
+        self.window_size = options['window_size']
+        self.batch_size = options['batch_size']
+
+        self.device = options['device']
+        self.lr_step = options['lr_step']
+        self.lr_decay_ratio = options['lr_decay_ratio']
+        self.accumulation_step = options['accumulation_step']
+        self.max_epoch = options['max_epoch']
+        self.criterion = None
+
+        self.sequentials = options['sequentials']
+        self.quantitatives = options['quantitatives']
+        self.semantics = options['semantics']
+        self.parameters = options['parameters']
+        self.sample = options['sample']
+        self.feature_num = options['feature_num']
+        self.num_classes = options['num_classes']
+        self.early_stopping = False
+        self.n_epochs_stop = options["n_epochs_stop"]
+        self.epochs_no_improve = 0
+        self.train_ratio = options['train_ratio']
+        self.valid_ratio = options['valid_ratio']
+        self.is_logkey = options["is_logkey"]
+        self.is_time = options["is_time"]
+        self.vocab_path = options["vocab_path"]
+        self.min_len = options["min_len"]
+
+        os.makedirs(self.save_dir, exist_ok=True)
+        self.k = 5
+        self.kf = KFold(n_splits=self.k, shuffle=True, random_state=1234)
+        self.best_score = 0
+
+    def load_data_for_fold(self, fold):
+        scale_path = os.path.join(self.save_dir, "scale.pkl")
+        scale = None
+        if os.path.exists(scale_path):
+            try:
+                with open(scale_path, 'rb') as f:
+                    scale = pickle.load(f)
+            except (EOFError, pickle.UnpicklingError) as e:
+                print(f"Error loading scale from {scale_path}: {e}. Setting scale to None.")
+                scale = None
+        else:
+            print(f"Scale file {scale_path} not found. Setting scale to None.")
+
+        train_path = os.path.join(self.output_dir, f'train_fold_{fold}')
+        hyper_path = os.path.join(self.output_dir, f'hyper_fold_{fold}')
+        valid_path = os.path.join(self.output_dir, f'valid_fold_{fold}')
+
+        train_logkeys, train_times = split_features(train_path, self.train_ratio, scale=scale, scale_path=scale_path,
+                                                    min_len=self.min_len)
+        hyper_logkeys, hyper_times = split_features(hyper_path, self.train_ratio, scale=scale, scale_path=scale_path,
+                                                    min_len=self.min_len)
+        valid_logkeys, valid_times = split_features(valid_path, self.train_ratio, scale=scale, scale_path=scale_path,
+                                                    min_len=self.min_len)
+
+        print("Loading vocab")
+        try:
+            with open(self.vocab_path, 'rb') as f:
+                vocab = pickle.load(f)
+        except FileNotFoundError:
+            print(f"Vocabulary file {self.vocab_path} not found. Please run the vocabulary generation step first.")
+            raise
+
+        train_logs, train_labels = sliding_window((train_logkeys, train_times), vocab=vocab,
+                                                  window_size=self.window_size)
+        hyper_logs, hyper_labels = sliding_window((hyper_logkeys, hyper_times), vocab=vocab,
+                                                  window_size=self.window_size)
+        valid_logs, valid_labels = sliding_window((valid_logkeys, valid_times), vocab=vocab,
+                                                  window_size=self.window_size)
+
+        del train_logkeys, train_times, hyper_logkeys, hyper_times, valid_logkeys, valid_times, vocab
+        gc.collect()
+
+        train_dataset = log_dataset(logs=train_logs,
+                                    labels=train_labels,
+                                    seq=self.sequentials,
+                                    quan=self.quantitatives,
+                                    sem=self.semantics,
+                                    param=self.parameters)
+        hyper_dataset = log_dataset(logs=hyper_logs,
+                                    labels=hyper_labels,
+                                    seq=self.sequentials,
+                                    quan=self.quantitatives,
+                                    sem=self.semantics,
+                                    param=self.parameters)
+        valid_dataset = log_dataset(logs=valid_logs,
+                                    labels=valid_labels,
+                                    seq=self.sequentials,
+                                    quan=self.quantitatives,
+                                    sem=self.semantics,
+                                    param=self.parameters)
+
+        del train_logs, hyper_logs, valid_logs
+        gc.collect()
+
+        train_loader = DataLoader(train_dataset,
+                                  batch_size=self.batch_size,
+                                  shuffle=True,
+                                  pin_memory=True)
+        hyper_loader = DataLoader(hyper_dataset,
+                                  batch_size=self.batch_size,
+                                  shuffle=False,
+                                  pin_memory=True)
+        valid_loader = DataLoader(valid_dataset,
+                                  batch_size=self.batch_size,
+                                  shuffle=False,
+                                  pin_memory=True)
+
+        num_train_log = len(train_dataset)
+        num_hyper_log = len(hyper_dataset)
+        num_valid_log = len(valid_dataset)
+
+        print('Find %d train logs, %d hyperparameter tuning logs, %d validation logs for fold %d' %
+              (num_train_log, num_hyper_log, num_valid_log, fold + 1))
+
+        return train_loader, hyper_loader, valid_loader
+
+    def setup_optimizer_and_criterion(self, options):
+        if options['optimizer'] =='sgd':
+            self.optimizer = torch.optim.SGD(self.model.parameters(),
+                                             lr=options['lr'],
+                                             momentum=0.9)
+        elif options['optimizer'] == 'adam':
+            self.optimizer = torch.optim.Adam(
+                self.model.parameters(),
+                lr=options['lr'],
+                betas=(0.9, 0.999),
+            )
+        else:
+            raise NotImplementedError
+
+        self.criterion = nn.CrossEntropyLoss(ignore_index=0)
+
+    def resume(self, path, load_optimizer=True):
+        print("Resuming from {}".format(path))
+        checkpoint = torch.load(path)
+        self.start_epoch = checkpoint['epoch'] + 1
+        self.best_loss = checkpoint['best_loss']
+        self.log = checkpoint['log']
+        self.best_f1_score = checkpoint['best_f1_score']
+        self.model.load_state_dict(checkpoint['state_dict'])
+        if "optimizer" in checkpoint.keys() and load_optimizer:
+            print("Loading optimizer state dict")
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+
+    def save_checkpoint(self, epoch, save_optimizer=True, suffix=""):
+        checkpoint = {
+            "epoch": epoch,
+            "state_dict": self.model.state_dict(),
+            "best_loss": self.best_loss,
+            "log": self.log,
+            "best_score": self.best_score
+        }
+        if save_optimizer:
+            checkpoint['optimizer'] = self.optimizer.state_dict()
+        save_path = os.path.join(self.save_dir, suffix + f"_fold_{self.current_fold}.pth")
+        torch.save(checkpoint, save_path)
+        print("Save model checkpoint at {}".format(save_path))
+
+    def save_log(self):
+        try:
+            for key, values in self.log.items():
+                pd.DataFrame(values).to_csv(os.path.join(self.save_dir, key + f"_log_fold_{self.current_fold}.csv"),
+                                            index=False)
+            print("Log saved")
+        except:
+            print("Failed to save logs")
+
+    def train(self, epoch, train_loader):
+        self.log['train']['epoch'].append(epoch)
+        start = time.strftime("%H:%M:%S")
+        lr = self.optimizer.state_dict()['param_groups'][0]['lr']
+        print("\nStarting epoch: %d | phase: train | ⏰: %s | Learning rate: %f" %
+              (epoch, start, lr))
+        self.log['train']['lr'].append(lr)
+        self.log['train']['time'].append(start)
+        self.model.train()
+        self.optimizer.zero_grad()
+
+        tbar = tqdm(train_loader, desc="\r")
+        num_batch = len(train_loader)
+        total_losses = 0
+        for i, (log, label) in enumerate(tbar):
+            features = []
+            for value in log.values():
+                features.append(value.clone().detach().to(self.device))
+
+            output = self.model(features=features, device=self.device)
+            output = output.squeeze()
+            label = label.view(-1).to(self.device)
+
+            loss = self.criterion(output, label)
+
+            total_losses += float(loss)
+            loss /= self.accumulation_step
+            loss.backward()
+
+            if (i + 1) % self.accumulation_step == 0:
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+            tbar.set_description("Train loss: %.5f" % (total_losses / (i + 1)))
+
+        self.log['train']['loss'].append(total_losses / num_batch)
+
+    def hyperparameter_tuning(self, hyper_loader):
+        # Placeholder for hyperparameter tuning logic
+        # Here you can implement a loop to adjust hyperparameters based on the performance on hyper_loader
+        pass
+
+    def valid(self, epoch, valid_loader):
+        self.model.eval()
+        self.log['valid']['epoch'].append(epoch)
+        lr = self.optimizer.state_dict()['param_groups'][0]['lr']
+        self.log['valid']['lr'].append(lr)
+        start = time.strftime("%H:%M:%S")
+        print("\nStarting epoch: %d | phase: valid | ⏰: %s " % (epoch, start))
+        self.log['valid']['time'].append(start)
+        total_losses = 0
+
+        tbar = tqdm(valid_loader, desc="\r")
+        num_batch = len(valid_loader)
+
+        errors = []
+        all_probs = []
+        all_labels = []
+
+        for i, (log, label) in enumerate(tbar):
+            with torch.no_grad():
+                features = []
+                for value in log.values():
+                    features.append(value.clone().detach().to(self.device))
+
+                output = self.model(features=features, device=self.device)
+                output = output.squeeze()
+                label = label.view(-1).to(self.device)
+
+                loss = self.criterion(output, label)
+
+                total_losses += float(loss)
+
+                probs = torch.softmax(output, dim=-1)
+                all_probs.extend(probs.cpu().numpy())
+                all_labels.extend(label.cpu().numpy())
+
+        print("\nValidation loss:", total_losses / num_batch)
+        self.log['valid']['loss'].append(total_losses / num_batch)
+
+        if total_losses / num_batch < self.best_loss:
+            self.best_loss = total_losses / num_batch
+
+            if self.is_time:
+                self.get_error_gaussian(errors)
+
+            self.save_checkpoint(epoch,
+                                 save_optimizer=False,
+                                 suffix="bestloss")
+            self.epochs_no_improve = 0
+        else:
+            self.epochs_no_improve += 1
+
+        if self.epochs_no_improve == self.n_epochs_stop:
+            self.early_stopping = True
+            print("Early stopping")
+
+        from sklearn.metrics import precision_recall_curve, auc, confusion_matrix
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import seaborn as sns
+        import pandas as pd
+
+        anomaly_scores = []
+        binary_labels = []
+        num_samples = len(all_labels)
+        num_anomalies = int(0.1 * num_samples)
+        anomaly_indices = np.random.choice(num_samples, num_anomalies, replace=False)
+        dummy_binary_labels = np.zeros(num_samples)
+        for idx in anomaly_indices:
+            dummy_binary_labels[idx] = 1
+
+        for i in range(len(all_labels)):
+            prob_true_label = all_probs[i][all_labels[i]]
+            anomaly_scores.append(1 - prob_true_label)
+            binary_labels.append(dummy_binary_labels[i])
+
+        precision, recall, thresholds_pr = precision_recall_curve(binary_labels, anomaly_scores)
+        pr_auc = auc(recall, precision)
+
+        plt.figure(figsize=(15, 5))
+
+        plt.subplot(1, 3, 1)
+        plt.plot(recall, precision, marker='.')
+        plt.title(f'Precision - Recall Curve (AUC = {pr_auc:.2f})')
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.grid(True)
+
+        threshold_cm = 0.5
+        predicted_labels_cm = [1 if score > threshold_cm else 0 for score in anomaly_scores]
+        cm = confusion_matrix(binary_labels, predicted_labels_cm)
+        plt.subplot(1, 3, 2)
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+        plt.title('Confusion Matrix')
+        plt.xlabel('Predicted Label')
+        plt.ylabel('True Label')
+
+        plt.subplot(1, 3, 3)
+        plt.hist(anomaly_scores, bins=50, alpha=0.7, color='g')
+        plt.title('Anomaly Score Distribution')
+        plt.xlabel('Anomaly Score')
+        plt.ylabel('Frequency')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.save_dir, f'pr_curve_confusion_matrix_anomaly_distribution_fold_{self.current_fold}.png'))
+        plt.close()
+
+    def start_train(self, model, options):
+        self.model = model
+        self.setup_optimizer_and_criterion(options)
+        self.log = {
+            'train': {'epoch': [], 'lr': [], 'time': [], 'loss': []},
+            'valid': {'epoch': [], 'lr': [], 'time': [], 'loss': []}
+        }
+        self.best_loss = float('inf')
+
+        for fold in range(self.k):
+            self.current_fold = fold
+            train_loader, hyper_loader, valid_loader = self.load_data_for_fold(fold)
+            for epoch in range(self.max_epoch):
+                self.train(epoch, train_loader)
+                self.hyperparameter_tuning(hyper_loader)
+                self.valid(epoch, valid_loader)
+                if self.early_stopping:
+                    break
+            self.save_log()
+            plot_train_valid_loss(self.save_dir)

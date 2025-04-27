@@ -10,7 +10,8 @@ cd $file
 
 mkdir -p 'bert'
 mkdir -p 'deeplog'
+mkdir -p 'tbirdmodel'
 mkdir -p 'loganomaly'
 
 
-echo "model dirs done"
+echo "folders done"

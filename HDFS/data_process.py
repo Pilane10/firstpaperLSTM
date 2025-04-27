@@ -13,7 +13,7 @@ from logparser import Spell, Drain
 # get [log key, delta time] as input for deeplog
 input_dir  = os.path.expanduser('~/.dataset/hdfs/')
 output_dir = '../output/hdfs/'  # The output directory of parsing results
-log_file   = "HDFS.log"  # The input log file name
+log_file   = "xHDFS.log"  # The input log file name
 
 log_structured_file = output_dir + log_file + "_structured.csv"
 log_templates_file = output_dir + log_file + "_templates.csv"

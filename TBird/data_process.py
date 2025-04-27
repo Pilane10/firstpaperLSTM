@@ -98,8 +98,8 @@ def sample_raw_data(data_file, output_file, sample_window_size, sample_step_size
 if __name__ == "__main__":
     data_dir = os.path.expanduser("~/.dataset/tbird/")
     output_dir = "../output/tbird/"
-    raw_log_file = "Thunderbird.log"
-    sample_log_file = "Thunderbird_20M.log"
+    raw_log_file = "1mtbird.log"
+    sample_log_file = "Tsample.log"
     sample_window_size = 2*10**7
     sample_step_size = 10**4
     window_name = ''

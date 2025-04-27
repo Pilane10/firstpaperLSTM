@@ -25,12 +25,6 @@ from logdeep.dataset.log import log_dataset
 from logdeep.dataset.sample import sliding_window, session_window, split_features
 from logdeep.tools.utils import save_parameters, plot_train_valid_loss
 
-from sklearn.metrics import precision_recall_curve, auc, confusion_matrix
-import matplotlib.pyplot as plt
-import numpy as np
-import seaborn as sns
-import pandas as pd
-
 
 class Trainer():
     def __init__(self, model, options):
@@ -72,14 +66,11 @@ class Trainer():
             if not os.path.exists(scale_path):
                 os.mknod(scale_path)
 
-            # Correct path construction for the train dataset
-            train_data_path = os.path.join(self.output_dir, "train")
-            logkeys, times = split_features(train_data_path,
+            logkeys, times = split_features(self.output_dir + "train",
                                             self.train_ratio,
                                             scale=None,
                                             scale_path=scale_path,
                                             min_len=self.min_len)
-
 
             train_logkeys, valid_logkeys, train_times, valid_times = train_test_split(logkeys, times, test_size=self.valid_ratio)
 
@@ -250,9 +241,6 @@ class Trainer():
 
         self.log['train']['loss'].append(total_losses / num_batch)
 
-        # Debugging: Print the training log
-        #print("Training Log:", self.log['train'])
-#####
     def valid(self, epoch):
         self.model.eval()
         self.log['valid']['epoch'].append(epoch)
@@ -308,48 +296,69 @@ class Trainer():
             self.early_stopping = True
             print("Early stopping")
 
-# Debugging: Print the validation log
-#        print("Validation Log:", self.log['valid'])
+        # --- Add PR curve, Confusion Matrix, and Anomaly Score Distribution plotting here ---
+        from sklearn.metrics import precision_recall_curve, auc, confusion_matrix
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import seaborn as sns
+        import pandas as pd
 
-        # Fix for TypeError: Ensure the DataFrame only has numeric values
-        #df_scores = pd.DataFrame({'Anomaly Score': all_probs, 'Label': all_labels})
-        #df_scores = df_scores.apply(pd.to_numeric,
-         #                           errors='coerce')  # Convert all columns to numeric, setting non-numeric values to NaN
+        # Assuming a way to determine anomaly scores from the probabilities
+        # For demonstration, let's use the probability of the true label as a basis
+        anomaly_scores = []
+        binary_labels = [] # Need binary labels (0 for normal, 1 for anomaly)
 
-        # Drop rows with NaN values (caused by non-numeric types)
-        #df_scores = df_scores.dropna()
+        # --- This is a simplified way to generate dummy anomaly labels ---
+        # --- In a real scenario, you would have actual anomaly labels in your validation set ---
+        num_samples = len(all_labels)
+        num_anomalies = int(0.1 * num_samples) # Assume 10% anomalies for demonstration
+        anomaly_indices = np.random.choice(num_samples, num_anomalies, replace=False)
+        dummy_binary_labels = np.zeros(num_samples)
+        for idx in anomaly_indices:
+            dummy_binary_labels[idx] = 1
+        # --------------------------------------------------------------------
 
-#        print(df_scores.head())
-#        print(df_scores.dtypes)
-#        print("Training Log:", self.log['train'])
-#        print("Validation Log:", self.log['valid'])
+        for i in range(len(all_labels)):
+            prob_true_label = all_probs[i][all_labels[i]]
+            anomaly_scores.append(1 - prob_true_label) # Higher score means more likely to be anomaly
+            binary_labels.append(dummy_binary_labels[i]) # Using dummy labels
 
+        precision, recall, thresholds_pr = precision_recall_curve(binary_labels, anomaly_scores)
+        pr_auc = auc(recall, precision)
 
-#######
-        # Plot the anomaly score distribution
-        #df_scores = pd.DataFrame({'Anomaly Score': all_probs, 'Label': all_labels})
-######
-        # Compatibility fix for older pandas versions
-        #if hasattr(pd.options.mode, "use_inf_as_null"):
-         #   with pd.option_context('mode.use_inf_as_null', True):
-         #       sns.histplot(data=df_scores, x='Anomaly Score', hue='Label', kde=True, palette={0: 'blue', 1: 'red'})
-        #else:
-            # Handle older pandas versions manually
-          #  df_scores = df_scores.replace([pd.NA, float('inf'), -float('inf')], pd.NA).dropna()
-           # sns.histplot(data=df_scores, x='Anomaly Score', hue='Label', kde=True, palette={0: 'blue', 1: 'red'})
+        plt.figure(figsize=(15, 5))
 
-        #plt.title('Anomaly Score Distribution')
-        #plt.xlabel('Anomaly Score')
-        #plt.ylabel('Frequency')
+        plt.subplot(1, 3, 1)
+        plt.plot(recall, precision, marker='.')
+        plt.title(f'Precision-Recall Curve (AUC = {pr_auc:.2f})')
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.grid(True)
 
-        #plt.tight_layout()
-        #plt.savefig(os.path.join(self.save_dir, f'epoch_{epoch}_anomaly_score_distribution.png'))
-        #plt.close()
-        #print("Anomaly Score Distribution saved.")
+        # --- Confusion Matrix ---
+        # Choose a threshold for classification (e.g., based on PR curve or a fixed value)
+        threshold_cm = 0.5
+        predicted_labels_cm = [1 if score > threshold_cm else 0 for score in anomaly_scores]
+        cm = confusion_matrix(binary_labels, predicted_labels_cm)
+        plt.subplot(1, 3, 2)
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=['Normal', 'Anomaly'], yticklabels=['Normal', 'Anomaly'])
+        plt.title('Confusion Matrix')
+        plt.xlabel('Predicted Label')
+        plt.ylabel('True Label')
 
+        # --- Anomaly Score Distribution ---
+        df_scores = pd.DataFrame({'Anomaly Score': anomaly_scores, 'Label': dummy_binary_labels})
+        plt.subplot(1, 3, 3)
+        sns.histplot(data=df_scores, x='Anomaly Score', hue='Label', kde=True, palette={0: 'blue', 1: 'red'})
+        plt.title('Anomaly Score Distribution')
+        plt.xlabel('Anomaly Score')
+        plt.ylabel('Frequency')
 
-
-
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.save_dir, f'epoch_{epoch}_pr_cm_score_curves.png'))
+        plt.close()
+        print("PR curve, Confusion Matrix, and Anomaly Score Distribution saved.")
 
         # print("The Gaussian distribution of predicted errors, --mean {:.4f} --std {:.4f}".format(mean, std))
         # sns_plot = sns.kdeplot(errors)

@@ -1,4 +1,3 @@
-import os
 import json
 from collections import Counter
 import pickle
@@ -59,23 +58,6 @@ def isint(x):
 
 
 def split_features(data_path, train_ratio=1, scale=None, scale_path=None, min_len=0):
-    """
-    Splits features from the dataset file.
-
-    Args:
-        data_path (str): Path to the dataset file.
-        train_ratio (float): Ratio of data to use for training.
-        scale (object): Scaler for time normalization.
-        scale_path (str): Path to save the scaler.
-        min_len (int): Minimum length of a sequence to include.
-
-    Returns:
-        tuple: logkeys and times
-    """
-    # Ensure the path is correct
-    if not os.path.isfile(data_path):
-        raise FileNotFoundError(f"No such file or directory: '{data_path}'")
-
     with open(data_path, 'r') as f:
         data = f.readlines()
 
@@ -83,7 +65,6 @@ def split_features(data_path, train_ratio=1, scale=None, scale_path=None, min_le
     data = data[:sample_size]
     logkeys = []
     times = []
-
     for line in data:
         line = [ln.split(",") for ln in line.split()]
 
@@ -91,53 +72,49 @@ def split_features(data_path, train_ratio=1, scale=None, scale_path=None, min_le
             continue
 
         line = np.array(line)
-        # If time duration exists in data
+        # if time duration exists in data
         if line.shape[1] == 2:
             tim = line[:, 1].astype(float)
             tim[0] = 0
             logkey = line[:, 0]
         else:
             logkey = line.squeeze()
-            # If time duration doesn't exist, then create a zero array for time
+            # if time duration doesn't exist, then create a zero array for time
             tim = np.zeros(logkey.shape)
 
         logkeys.append(logkey.tolist())
         times.append(tim.tolist())
 
     if scale is not None:
-        total_times = np.concatenate(times, axis=0).reshape(-1, 1)
+        total_times = np.concatenate(times, axis=0).reshape(-1,1)
         scale.fit(total_times)
 
         for i, tn in enumerate(times):
-            tn = np.array(tn).reshape(-1, 1)
+            tn = np.array(tn).reshape(-1,1)
             times[i] = scale.transform(tn).reshape(-1).tolist()
 
         with open(scale_path, 'wb') as f:
             pickle.dump(scale, f)
-        print(f"Save scale at {scale_path}\n")
+        print("Save scale {} at {}\n".format(scale, scale_path))
 
     return logkeys, times
 
 
 def sliding_window(data_iter, vocab, window_size, is_train=True):
-    """
-    Creates sliding window datasets.
-
-    Args:
-        data_iter (iterable): Iterable containing log data and parameters.
-        vocab (object): Vocabulary object for encoding.
-        window_size (int): Size of the sliding window.
-        is_train (bool): Whether the operation is for training.
-
-    Returns:
-        tuple: Resulting logs and labels.
-    """
-    result_logs = {
-        'Sequentials': [],
-        'Quantitatives': [],
-        'Semantics': [],
-        'Parameters': []
-    }
+    '''
+    dataset structure
+        result_logs(dict):
+            result_logs['feature0'] = list()
+            result_logs['feature1'] = list()
+            ...
+        labels(list)
+    '''
+    #event2semantic_vec = read_json(data_dir + 'hdfs/event2semantic_vec.json')
+    result_logs = {}
+    result_logs['Sequentials'] = []
+    result_logs['Quantitatives'] = []
+    result_logs['Semantics'] = []
+    result_logs['Parameters'] = []
     labels = []
 
     num_sessions = 0
@@ -145,12 +122,12 @@ def sliding_window(data_iter, vocab, window_size, is_train=True):
 
     for line, params in zip(*data_iter):
         if num_sessions % 1000 == 0:
-            print(f"Processed {num_sessions} lines", end='\r')
+            print("processed %s lines"%num_sessions, end='\r')
         num_sessions += 1
 
         line = [vocab.stoi.get(ln, vocab.unk_index) for ln in line]
 
-        session_len = max(len(line), window_size) + 1  # Predict the next one
+        session_len = max(len(line), window_size) + 1# predict the next one
         padding_size = session_len - len(line)
         params = params + [0] * padding_size
         line = line + [vocab.pad_index] * padding_size
@@ -166,6 +143,8 @@ def sliding_window(data_iter, vocab, window_size, is_train=True):
             for key in log_counter:
                 Quantitative_pattern[key] = log_counter[key]
 
+            # Sequential_pattern = np.array(Sequential_pattern)[:, np.newaxis]
+            # Quantitative_pattern = np.array(Quantitative_pattern)[:, np.newaxis]
             Sequential_pattern = np.array(Sequential_pattern)
             Quantitative_pattern = np.array(Quantitative_pattern)[:, np.newaxis]
 
@@ -176,46 +155,32 @@ def sliding_window(data_iter, vocab, window_size, is_train=True):
             labels.append(line[i + window_size])
 
     if is_train:
-        print(f'Number of sessions: {num_sessions}')
-        print(f'Number of seqs: {len(result_logs["Sequentials"])}')
+        print('number of sessions {}'.format(num_sessions))
+        print('number of seqs {}'.format(len(result_logs['Sequentials'])))
 
     return result_logs, labels
 
 
 def session_window(data_dir, datatype, sample_ratio=1):
-    """
-    Processes sessions using session-based windows.
-
-    Args:
-        data_dir (str): Path to the data directory.
-        datatype (str): Type of data ('train', 'val', 'test').
-        sample_ratio (float): Down-sampling ratio.
-
-    Returns:
-        tuple: Resulting logs and labels.
-    """
-    event2semantic_vec = read_json(os.path.join(data_dir, 'hdfs/event2semantic_vec.json'))
-    result_logs = {
-        'Sequentials': [],
-        'Quantitatives': [],
-        'Semantics': []
-    }
+    event2semantic_vec = read_json(data_dir + 'hdfs/event2semantic_vec.json')
+    result_logs = {}
+    result_logs['Sequentials'] = []
+    result_logs['Quantitatives'] = []
+    result_logs['Semantics'] = []
     labels = []
 
-    data_file = None
     if datatype == 'train':
-        data_file = os.path.join(data_dir, 'hdfs/robust_log_train.csv')
+        data_dir += 'hdfs/robust_log_train.csv'
     elif datatype == 'val':
-        data_file = os.path.join(data_dir, 'hdfs/robust_log_valid.csv')
+        data_dir += 'hdfs/robust_log_valid.csv'
     elif datatype == 'test':
-        data_file = os.path.join(data_dir, 'hdfs/robust_log_test.csv')
+        data_dir += 'hdfs/robust_log_test.csv'
 
-    if not data_file or not os.path.isfile(data_file):
-        raise FileNotFoundError(f"No such file: '{data_file}'")
-
-    train_df = pd.read_csv(data_file)
+    train_df = pd.read_csv(data_dir)
     for i in tqdm(range(len(train_df))):
-        ori_seq = [int(eventid) for eventid in train_df["Sequence"][i].split(' ')]
+        ori_seq = [
+            int(eventid) for eventid in train_df["Sequence"][i].split(' ')
+        ]
         Sequential_pattern = trp(ori_seq, 50)
         Semantic_pattern = []
         for event in Sequential_pattern:
@@ -229,7 +194,7 @@ def session_window(data_dir, datatype, sample_ratio=1):
         for key in log_counter:
             Quantitative_pattern[key] = log_counter[key]
 
-        Sequential_pattern = np.array(Sequential_pattern)
+        Sequential_pattern = np.array(Sequential_pattern) # [:, np.newaxis]
         Quantitative_pattern = np.array(Quantitative_pattern)[:, np.newaxis]
         result_logs['Sequentials'].append(Sequential_pattern)
         result_logs['Quantitatives'].append(Quantitative_pattern)
@@ -239,5 +204,8 @@ def session_window(data_dir, datatype, sample_ratio=1):
     if sample_ratio != 1:
         result_logs, labels = down_sample(result_logs, labels, sample_ratio)
 
-    print(f'Number of sessions({data_file}): {len(result_logs["Semantics"])}')
+    # result_logs, labels = up_sample(result_logs, labels)
+
+    print('Number of sessions({}): {}'.format(data_dir,
+                                              len(result_logs['Semantics'])))
     return result_logs, labels

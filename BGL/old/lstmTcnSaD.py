@@ -1,24 +1,24 @@
 # -*- coding: utf-8 -*-
+import platform
 import argparse
 import sys
-sys.path.append('../')
+sys.path.append('../../')
 
-from logdeep.models.lstm import *
-from logdeep.tools.predict import Predicter
-from logdeep.tools.train import Trainer
+from logdeep.models.LstmTcnSaND import LstmTcnWithAttention
+from logdeep.tools.predict_lstmTcn import Predicter
+from logdeep.tools.train_lstmTcn import Trainer
 from logdeep.tools.utils import *
 from logdeep.dataset.vocab import Vocab
 
 import torch
 
-output_dir = "../output/bgl/"
+output_dir = "../../output/bgl/"
 
 # Config Parameters
 options = dict()
 options['output_dir'] = output_dir
 options['train_vocab'] = output_dir + 'train'
 options["vocab_path"] = output_dir + "vocab.pkl"
-
 
 options['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -27,8 +27,7 @@ options['sample'] = "sliding_window"
 options['window_size'] = 20  # if fix_window
 options['train_ratio'] = 1
 options['valid_ratio'] = 0.1
-options["test_ratio"] = 1
-
+options['test_ratio'] = 1
 options["min_len"] = 10
 
 options["is_logkey"] = True
@@ -36,7 +35,7 @@ options["is_time"] = False
 
 # Features
 options['sequentials'] = options["is_logkey"]
-options['quantitatives'] = True
+options['quantitatives'] = False
 options['semantics'] = False
 options['parameters'] = options["is_time"]
 options['feature_num'] = sum(
@@ -44,33 +43,48 @@ options['feature_num'] = sum(
 
 # Model
 options['input_size'] = 1
-options['hidden_size'] = 64
-options['num_layers'] = 2
-options['num_classes'] = 177
-options["embedding_dim"] = 50
-options["vocab_size"] = options['num_classes']
+options['hidden_size'] = 128
+options['num_layers'] = 4
+options["embedding_dim"] = 100
+options["vocab_size"] = 200
+options['num_classes'] = options["vocab_size"]
+
+# Attention Configuration (New)
+options['num_attention_heads'] = 8  # Specify the number of attention heads
+
+# Disable Dropout and Layer Normalization for troubleshooting
+options['dropout'] = 0.2  # set to 0 to Disable dropout
+options['use_layer_norm'] = False  # Disable layer normalization
+
+
 # Train
-options['batch_size'] = 128
-options['accumulation_step'] = 1
+options['batch_size'] = 256 #128
+options['accumulation_step'] = 2 #1
 
 options['optimizer'] = 'adam'
-options['lr'] = 0.01
-options['max_epoch'] = 7
+options['lr'] = 2e-3
+options['max_epoch'] = 5
 options["n_epochs_stop"] = 10
-options['lr_step'] = (options['max_epoch'] - 20, options['max_epoch'])
-options['lr_decay_ratio'] = 0.1
+#options['lr_step'] = (options['max_epoch'] - 20, options['max_epoch'])
+#options['lr_decay_ratio'] = 0.1
+
+options['weight_decay'] = 1e-5
+options['lr_step'] = (5, 10)  # Decay after 5 epochs
+options['lr_decay_ratio'] = 0.5  # More aggressive decay
+
 
 options['resume_path'] = None
-options['model_name'] = "loganomaly"
-options['save_dir'] = options["output_dir"] + "loganomaly/"
+options['model_name'] = "LstmTcnWithAttentionDropout"
+options['save_dir'] = options["output_dir"] + "LstmTcnWithAttentionDropout/"
 
 # Predict
 options['model_path'] = options["save_dir"] + "bestloss.pth"
 options['num_candidates'] = 9
-options["threshold"] = None
+options["threshold"] = None ####
 options["gaussian_mean"] = 0
 options["gaussian_std"] = 0
 options["num_outputs"] = 1
+
 
 
 print("Features logkey:{} time: {}".format(options["is_logkey"], options["is_time"]))
@@ -78,11 +92,15 @@ print("Device:", options['device'])
 
 seed_everything(seed=1234)
 
-Model = loganomaly(input_size=options['input_size'],
-                hidden_size=options['hidden_size'],
-                num_layers=options['num_layers'],
-                vocab_size=options["vocab_size"],
-                embedding_dim=options["embedding_dim"])
+# Initialize the updated model with Attention (Disabled Dropout and Normalization)
+Model = LstmTcnWithAttention(input_size=options['input_size'],
+                              hidden_size=options['hidden_size'],
+                              num_layers=options['num_layers'],
+                              vocab_size=options["vocab_size"],
+                              embedding_dim=options["embedding_dim"],
+                              heads=options['num_attention_heads'],
+                              dropout=options['dropout'],  # Disable dropout
+                              use_layer_norm=options['use_layer_norm'])  # Disable layer normalization
 
 
 def train():
@@ -104,6 +122,8 @@ if __name__ == "__main__":
 
     predict_parser = subparsers.add_parser('predict')
     predict_parser.set_defaults(mode='predict')
+    predict_parser.add_argument('--mean', type=float, default=0, help='error gaussian distribution mean')
+    predict_parser.add_argument('--std', type=float, default=0, help='error gaussian distribution std')
 
     vocab_parser = subparsers.add_parser('vocab')
     vocab_parser.set_defaults(mode='vocab')

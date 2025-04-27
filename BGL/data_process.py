@@ -121,7 +121,7 @@ if __name__ == "__main__":
     # Transformation #
     ##################
     # mins
-    window_size = 5
+    window_size = 1 #5
     step_size = 1
     train_ratio = 0.4
 

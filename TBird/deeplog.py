@@ -56,7 +56,7 @@ options['accumulation_step'] = 1
 
 options['optimizer'] = 'adam'
 options['lr'] = 0.01
-options['max_epoch'] = 200
+options['max_epoch'] = 21
 options["n_epochs_stop"] = 10
 options['lr_step'] = (options['max_epoch'] - 20, options['max_epoch'])
 options['lr_decay_ratio'] = 0.1

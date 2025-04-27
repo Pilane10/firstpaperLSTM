@@ -49,12 +49,12 @@ options["embedding_dim"] = 50
 options["vocab_size"] = 200
 options['num_classes'] = options["vocab_size"]
 # Train
-options['batch_size'] = 128
+options['batch_size'] = 1024 #128
 options['accumulation_step'] = 1
 
 options['optimizer'] = 'adam'
 options['lr'] = 0.01
-options['max_epoch'] = 200
+options['max_epoch'] = 3
 options["n_epochs_stop"] = 10
 options['lr_step'] = (options['max_epoch'] - 20, options['max_epoch'])
 options['lr_decay_ratio'] = 0.1

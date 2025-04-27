@@ -14,7 +14,6 @@ import numpy as np
 from tqdm import tqdm
 import pickle
 
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -24,12 +23,6 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from logdeep.dataset.log import log_dataset
 from logdeep.dataset.sample import sliding_window, session_window, split_features
 from logdeep.tools.utils import save_parameters, plot_train_valid_loss
-
-from sklearn.metrics import precision_recall_curve, auc, confusion_matrix
-import matplotlib.pyplot as plt
-import numpy as np
-import seaborn as sns
-import pandas as pd
 
 
 class Trainer():
@@ -72,14 +65,11 @@ class Trainer():
             if not os.path.exists(scale_path):
                 os.mknod(scale_path)
 
-            # Correct path construction for the train dataset
-            train_data_path = os.path.join(self.output_dir, "train")
-            logkeys, times = split_features(train_data_path,
+            logkeys, times = split_features(self.output_dir + "train",
                                             self.train_ratio,
                                             scale=None,
                                             scale_path=scale_path,
                                             min_len=self.min_len)
-
 
             train_logkeys, valid_logkeys, train_times, valid_times = train_test_split(logkeys, times, test_size=self.valid_ratio)
 
@@ -157,7 +147,6 @@ class Trainer():
             raise NotImplementedError
 
         self.criterion = nn.CrossEntropyLoss(ignore_index=0)
-        # self.time_criterion = nn.MSELoss()
 
         self.start_epoch = 0
         self.best_loss = 1e10
@@ -188,6 +177,7 @@ class Trainer():
             self.optimizer.load_state_dict(checkpoint['optimizer'])
 
     def save_checkpoint(self, epoch, save_optimizer=True, suffix=""):
+        # Save model checkpoint only if validation loss improves
         checkpoint = {
             "epoch": epoch,
             "state_dict": self.model.state_dict(),
@@ -197,15 +187,15 @@ class Trainer():
         }
         if save_optimizer:
             checkpoint['optimizer'] = self.optimizer.state_dict()
+
         save_path = self.save_dir + suffix + ".pth"
         torch.save(checkpoint, save_path)
-        print("Save model checkpoint at {}".format(save_path))
+        print(f"Model checkpoint saved at {save_path}")
 
     def save_log(self):
         try:
             for key, values in self.log.items():
-                pd.DataFrame(values).to_csv(self.save_dir + key + "_log.csv",
-                                            index=False)
+                pd.DataFrame(values).to_csv(self.save_dir + key + "_log.csv", index=False)
             print("Log saved")
         except:
             print("Failed to save logs")
@@ -229,8 +219,7 @@ class Trainer():
             for value in log.values():
                 features.append(value.clone().detach().to(self.device))
 
-            # output is log key and timestamp
-            output = self.model(features=features, device=self.device)
+            output = self.model(*features)
             output = output.squeeze()
             label = label.view(-1).to(self.device)
 
@@ -240,19 +229,14 @@ class Trainer():
             loss /= self.accumulation_step
             loss.backward()
 
-            # Basically it involves making optimizer steps after several batches
-            # thus increasing effective batch size.
-            # https: // www.kaggle.com / c / understanding_cloud_organization / discussion / 105614
             if (i + 1) % self.accumulation_step == 0:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
             tbar.set_description("Train loss: %.5f" % (total_losses / (i + 1)))
 
         self.log['train']['loss'].append(total_losses / num_batch)
+        torch.cuda.empty_cache()
 
-        # Debugging: Print the training log
-        #print("Training Log:", self.log['train'])
-#####
     def valid(self, epoch):
         self.model.eval()
         self.log['valid']['epoch'].append(epoch)
@@ -276,7 +260,7 @@ class Trainer():
                 for value in log.values():
                     features.append(value.clone().detach().to(self.device))
 
-                output = self.model(features=features, device=self.device)
+                output = self.model(*features)
                 output = output.squeeze()
                 label = label.view(-1).to(self.device)
 
@@ -293,13 +277,7 @@ class Trainer():
 
         if total_losses / num_batch < self.best_loss:
             self.best_loss = total_losses / num_batch
-
-            if self.is_time:
-                self.get_error_gaussian(errors)
-
-            self.save_checkpoint(epoch,
-                                 save_optimizer=False,
-                                 suffix="bestloss")
+            self.save_checkpoint(epoch, save_optimizer=False, suffix="bestloss")
             self.epochs_no_improve = 0
         else:
             self.epochs_no_improve += 1
@@ -307,55 +285,6 @@ class Trainer():
         if self.epochs_no_improve == self.n_epochs_stop:
             self.early_stopping = True
             print("Early stopping")
-
-# Debugging: Print the validation log
-#        print("Validation Log:", self.log['valid'])
-
-        # Fix for TypeError: Ensure the DataFrame only has numeric values
-        #df_scores = pd.DataFrame({'Anomaly Score': all_probs, 'Label': all_labels})
-        #df_scores = df_scores.apply(pd.to_numeric,
-         #                           errors='coerce')  # Convert all columns to numeric, setting non-numeric values to NaN
-
-        # Drop rows with NaN values (caused by non-numeric types)
-        #df_scores = df_scores.dropna()
-
-#        print(df_scores.head())
-#        print(df_scores.dtypes)
-#        print("Training Log:", self.log['train'])
-#        print("Validation Log:", self.log['valid'])
-
-
-#######
-        # Plot the anomaly score distribution
-        #df_scores = pd.DataFrame({'Anomaly Score': all_probs, 'Label': all_labels})
-######
-        # Compatibility fix for older pandas versions
-        #if hasattr(pd.options.mode, "use_inf_as_null"):
-         #   with pd.option_context('mode.use_inf_as_null', True):
-         #       sns.histplot(data=df_scores, x='Anomaly Score', hue='Label', kde=True, palette={0: 'blue', 1: 'red'})
-        #else:
-            # Handle older pandas versions manually
-          #  df_scores = df_scores.replace([pd.NA, float('inf'), -float('inf')], pd.NA).dropna()
-           # sns.histplot(data=df_scores, x='Anomaly Score', hue='Label', kde=True, palette={0: 'blue', 1: 'red'})
-
-        #plt.title('Anomaly Score Distribution')
-        #plt.xlabel('Anomaly Score')
-        #plt.ylabel('Frequency')
-
-        #plt.tight_layout()
-        #plt.savefig(os.path.join(self.save_dir, f'epoch_{epoch}_anomaly_score_distribution.png'))
-        #plt.close()
-        #print("Anomaly Score Distribution saved.")
-
-
-
-
-
-        # print("The Gaussian distribution of predicted errors, --mean {:.4f} --std {:.4f}".format(mean, std))
-        # sns_plot = sns.kdeplot(errors)
-        # sns_plot.get_figure().savefig(self.save_dir + "valid_error_dist.png")
-        # plt.close()
-        # print("validation error distribution saved")
 
     def start_train(self):
         for epoch in range(self.start_epoch, self.max_epoch):

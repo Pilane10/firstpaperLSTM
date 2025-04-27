@@ -55,9 +55,11 @@ class Predicter():
 
     def detect_logkey_anomaly(self, output, label):
         num_anomaly = 0
-        for i in range(len(label)):
-            predicted = torch.argsort(output[i])[-self.num_candidates:].clone().detach().cpu()
-            if label[i] not in predicted:
+        # Assuming output is (batch_size, 1, vocab_size)
+        for i in range(output.size(0)): # Iterate over the batch size
+            predicted = torch.argsort(output[i][0])[-self.num_candidates:].clone().detach().cpu()
+            true_label = label[i].item() # Get the integer value from the 0-dim tensor
+            if true_label not in predicted:
                 num_anomaly += 1
         return num_anomaly
 
@@ -166,7 +168,6 @@ class Predicter():
     def predict_unsupervised(self):
         model = self.model.to(self.device)
         model.load_state_dict(torch.load(self.model_path)['state_dict'])
-        #model.load_state_dict(torch.load(self.model_path, weights_only=True)['state_dict'])
         model.eval()
         print('model_path: {}'.format(self.model_path))
 
